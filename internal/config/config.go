@@ -83,6 +83,7 @@ type TrackerConfig struct {
 	Kind            string
 	Endpoint        string
 	APIKey          string
+	APIVersion      string
 	Project         string
 	ActiveStates    []string
 	TerminalStates  []string
@@ -355,6 +356,7 @@ func buildTrackerConfig(m map[string]any, envKeys map[string]bool) TrackerConfig
 		Kind:            extractString(m, "kind"),
 		Endpoint:        endpoint,
 		APIKey:          apiKey,
+		APIVersion:      extractString(m, "api_version"),
 		Project:         project,
 		ActiveStates:    extractStringSlice(mapVal(m, "active_states")),
 		TerminalStates:  extractStringSlice(mapVal(m, "terminal_states")),

@@ -2014,3 +2014,317 @@ func TestFetchCandidateIssueByIDEquivalence(t *testing.T) {
 	_, err = a.FetchIssueByID(ctx, "99999")
 	assertTrackerErrorKind(t, err, domain.ErrTrackerNotFound)
 }
+
+// --- API v2 tests ---
+
+func validV2Config(endpoint string) map[string]any {
+	return map[string]any{
+		"endpoint":    endpoint,
+		"api_key":     "my_personal_access_token",
+		"api_version": "2",
+		"project":     "SRVR",
+	}
+}
+
+func TestNewJiraAdapter_APIVersionDefault(t *testing.T) {
+	t.Parallel()
+
+	a := mustAdapter(t, validConfig("https://x.atlassian.net"))
+	if a.apiVersion != "3" {
+		t.Errorf("apiVersion = %q, want %q", a.apiVersion, "3")
+	}
+}
+
+func TestNewJiraAdapter_APIVersion2(t *testing.T) {
+	t.Parallel()
+
+	a := mustAdapter(t, validV2Config("https://jira.corp.example.com"))
+	if a.apiVersion != "2" {
+		t.Errorf("apiVersion = %q, want %q", a.apiVersion, "2")
+	}
+}
+
+func TestNewJiraAdapter_APIVersionInvalid(t *testing.T) {
+	t.Parallel()
+
+	config := map[string]any{
+		"endpoint":    "https://jira.corp.example.com",
+		"api_key":     "user:pass",
+		"api_version": "1",
+		"project":     "P",
+	}
+	_, err := NewJiraAdapter(config)
+	assertTrackerErrorKind(t, err, domain.ErrTrackerPayload)
+}
+
+func TestNewJiraAdapter_V2_BearerAuth(t *testing.T) {
+	t.Parallel()
+
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Write([]byte(`{"issues":[],"startAt":0,"total":0,"maxResults":50}`)) //nolint:errcheck // test helper
+	}))
+	defer srv.Close()
+
+	// PAT without colon → bearer auth
+	config := validV2Config(srv.URL)
+	a := mustAdapter(t, config)
+	_, err := a.FetchCandidateIssues(context.Background())
+	if err != nil {
+		t.Fatalf("FetchCandidateIssues: %v", err)
+	}
+	if !strings.HasPrefix(gotAuth, "Bearer ") {
+		t.Errorf("Authorization = %q, want Bearer prefix", gotAuth)
+	}
+	if gotAuth != "Bearer my_personal_access_token" {
+		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer my_personal_access_token")
+	}
+}
+
+func TestNewJiraAdapter_V2_BasicAuth(t *testing.T) {
+	t.Parallel()
+
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Write([]byte(`{"issues":[],"startAt":0,"total":0,"maxResults":50}`)) //nolint:errcheck // test helper
+	}))
+	defer srv.Close()
+
+	// user:password format → basic auth
+	config := map[string]any{
+		"endpoint":    srv.URL,
+		"api_key":     "admin:secretpass",
+		"api_version": "2",
+		"project":     "SRVR",
+	}
+	a := mustAdapter(t, config)
+	_, err := a.FetchCandidateIssues(context.Background())
+	if err != nil {
+		t.Fatalf("FetchCandidateIssues: %v", err)
+	}
+	if !strings.HasPrefix(gotAuth, "Basic ") {
+		t.Errorf("Authorization = %q, want Basic prefix", gotAuth)
+	}
+}
+
+func TestFetchCandidateIssues_V2_SinglePage(t *testing.T) {
+	t.Parallel()
+
+	fixture := loadFixture(t, "search_single_page_v2.json")
+	var receivedPath string
+	var receivedJQL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		receivedJQL = r.URL.Query().Get("jql")
+		w.Write(fixture) //nolint:errcheck // test helper
+	}))
+	defer srv.Close()
+
+	a := mustAdapter(t, validV2Config(srv.URL))
+	issues, err := a.FetchCandidateIssues(context.Background())
+	if err != nil {
+		t.Fatalf("FetchCandidateIssues: %v", err)
+	}
+
+	// Verify v2 search path
+	if receivedPath != "/rest/api/2/search" {
+		t.Errorf("path = %q, want /rest/api/2/search", receivedPath)
+	}
+
+	if len(issues) != 2 {
+		t.Fatalf("len = %d, want 2", len(issues))
+	}
+
+	// Verify plain-text description (not ADF)
+	if issues[0].Description != "This is a plain text description." {
+		t.Errorf("issues[0].Description = %q, want plain text", issues[0].Description)
+	}
+	if issues[0].Identifier != "SRVR-1" {
+		t.Errorf("issues[0].Identifier = %q", issues[0].Identifier)
+	}
+	if issues[0].Comments != nil {
+		t.Error("Comments should be nil for search results")
+	}
+	if issues[0].Labels[0] != "backend" {
+		t.Errorf("labels not lowercased: %v", issues[0].Labels)
+	}
+
+	// Verify JQL
+	if !strings.Contains(receivedJQL, "ORDER BY priority ASC, created ASC") {
+		t.Errorf("JQL missing ORDER BY: %q", receivedJQL)
+	}
+}
+
+func TestFetchCandidateIssues_V2_MultiPage(t *testing.T) {
+	t.Parallel()
+
+	var callCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&callCount, 1)
+		startAt := r.URL.Query().Get("startAt")
+		if n == 1 || startAt == "0" {
+			w.Write([]byte(`{"issues":[{"id":"1","key":"S-1","fields":{"summary":"First","status":{"name":"Open"},"description":"desc1","created":"2025-01-01T00:00:00.000+0000","updated":"2025-01-01T00:00:00.000+0000"}}],"startAt":0,"total":2,"maxResults":1}`)) //nolint:errcheck // test helper
+		} else {
+			w.Write([]byte(`{"issues":[{"id":"2","key":"S-2","fields":{"summary":"Second","status":{"name":"Open"},"description":"desc2","created":"2025-01-02T00:00:00.000+0000","updated":"2025-01-02T00:00:00.000+0000"}}],"startAt":1,"total":2,"maxResults":1}`)) //nolint:errcheck // test helper
+		}
+	}))
+	defer srv.Close()
+
+	a := mustAdapter(t, validV2Config(srv.URL))
+	issues, err := a.FetchCandidateIssues(context.Background())
+	if err != nil {
+		t.Fatalf("FetchCandidateIssues: %v", err)
+	}
+	if len(issues) != 2 {
+		t.Fatalf("len = %d, want 2", len(issues))
+	}
+	if issues[0].Identifier != "S-1" {
+		t.Errorf("issues[0].Identifier = %q", issues[0].Identifier)
+	}
+	if issues[1].Identifier != "S-2" {
+		t.Errorf("issues[1].Identifier = %q", issues[1].Identifier)
+	}
+}
+
+func TestFetchIssueByID_V2(t *testing.T) {
+	t.Parallel()
+
+	issueJSON := `{"id":"20001","key":"SRVR-1","fields":{"summary":"Server issue","status":{"name":"Open"},"priority":{"id":"3"},"labels":[],"assignee":null,"issuetype":{"name":"Bug"},"parent":null,"issuelinks":[],"description":"Plain text desc.","created":"2025-06-01T09:00:00.000+0000","updated":"2025-06-02T10:00:00.000+0000"}}`
+	commentsJSON := loadFixture(t, "comments_v2.json")
+
+	var issuePath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/comment") {
+			w.Write(commentsJSON) //nolint:errcheck // test helper
+		} else {
+			issuePath = r.URL.Path
+			w.Write([]byte(issueJSON)) //nolint:errcheck // test helper
+		}
+	}))
+	defer srv.Close()
+
+	a := mustAdapter(t, validV2Config(srv.URL))
+	issue, err := a.FetchIssueByID(context.Background(), "SRVR-1")
+	if err != nil {
+		t.Fatalf("FetchIssueByID: %v", err)
+	}
+
+	// Verify v2 path
+	if issuePath != "/rest/api/2/issue/SRVR-1" {
+		t.Errorf("path = %q, want /rest/api/2/issue/SRVR-1", issuePath)
+	}
+
+	// Plain text description (not ADF)
+	if issue.Description != "Plain text desc." {
+		t.Errorf("Description = %q, want plain text", issue.Description)
+	}
+
+	// Comments with plain text bodies
+	if len(issue.Comments) != 2 {
+		t.Fatalf("len(Comments) = %d, want 2", len(issue.Comments))
+	}
+	if issue.Comments[0].Body != "This is a plain text comment." {
+		t.Errorf("Comments[0].Body = %q", issue.Comments[0].Body)
+	}
+	if issue.Comments[0].Author != "Charlie" {
+		t.Errorf("Comments[0].Author = %q", issue.Comments[0].Author)
+	}
+}
+
+func TestCommentIssue_V2_PlainText(t *testing.T) {
+	t.Parallel()
+
+	var receivedPath string
+	var receivedBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		receivedBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+
+	a := mustAdapter(t, validV2Config(srv.URL))
+	if err := a.CommentIssue(context.Background(), "SRVR-1", "Hello\nWorld"); err != nil {
+		t.Fatalf("CommentIssue: %v", err)
+	}
+
+	// Verify v2 path
+	if receivedPath != "/rest/api/2/issue/SRVR-1/comment" {
+		t.Errorf("path = %q, want /rest/api/2/issue/SRVR-1/comment", receivedPath)
+	}
+
+	// v2 comment body should be plain text, not ADF
+	var body map[string]string
+	if err := json.Unmarshal(receivedBody, &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	if body["body"] != "Hello\nWorld" {
+		t.Errorf("body = %q, want %q", body["body"], "Hello\nWorld")
+	}
+}
+
+func TestTransitionIssue_V2_Path(t *testing.T) {
+	t.Parallel()
+
+	var getPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case "GET":
+			getPath = r.URL.Path
+			w.Write(loadFixture(t, "transitions.json")) //nolint:errcheck // test helper
+		case "POST":
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+
+	a := mustAdapter(t, validV2Config(srv.URL))
+	err := a.TransitionIssue(context.Background(), "SRVR-1", "Human Review")
+	if err != nil {
+		t.Fatalf("TransitionIssue: %v", err)
+	}
+
+	wantPath := "/rest/api/2/issue/SRVR-1/transitions"
+	if getPath != wantPath {
+		t.Errorf("GET path = %q, want %q", getPath, wantPath)
+	}
+}
+
+func TestNormalizeSearchIssue_V2_StringDescription(t *testing.T) {
+	t.Parallel()
+
+	ji := jiraIssue{
+		ID:  "1",
+		Key: "S-1",
+		Fields: jiraFields{
+			Summary:     "Test",
+			Description: json.RawMessage(`"Hello world"`),
+		},
+	}
+	issue := normalizeSearchIssue("https://jira.corp.example.com", ji, false)
+	if issue.Description != "Hello world" {
+		t.Errorf("Description = %q, want %q", issue.Description, "Hello world")
+	}
+}
+
+func TestNormalizeComments_V2_StringBody(t *testing.T) {
+	t.Parallel()
+
+	comments := []jiraComment{
+		{
+			ID:      "100",
+			Author:  &jiraUser{DisplayName: "Alice"},
+			Body:    json.RawMessage(`"Plain text comment"`),
+			Created: "2025-01-01T00:00:00.000+0000",
+		},
+	}
+	result := normalizeComments(comments, false)
+	if len(result) != 1 {
+		t.Fatalf("len = %d, want 1", len(result))
+	}
+	if result[0].Body != "Plain text comment" {
+		t.Errorf("Body = %q, want %q", result[0].Body, "Plain text comment")
+	}
+}

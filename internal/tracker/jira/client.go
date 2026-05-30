@@ -12,10 +12,19 @@ import (
 	"github.com/sortie-ai/sortie/internal/httpkit"
 )
 
-// newJiraClient constructs the shared Jira transport.
-func newJiraClient(baseURL, email, token, userAgent string) *httpkit.Client {
+// newJiraClient constructs the shared Jira transport. The authScheme
+// parameter selects the authorization method: "basic" produces a
+// Basic header from email:token, "bearer" produces a Bearer header
+// from token alone (used for Personal Access Tokens on Server/DC).
+func newJiraClient(baseURL, email, token, userAgent, authScheme string) *httpkit.Client {
 	trimmedBaseURL := strings.TrimRight(baseURL, "/")
-	authHeader := "Basic " + base64.StdEncoding.EncodeToString([]byte(email+":"+token))
+
+	var authHeader string
+	if authScheme == "bearer" {
+		authHeader = "Bearer " + token
+	} else {
+		authHeader = "Basic " + base64.StdEncoding.EncodeToString([]byte(email+":"+token))
+	}
 
 	return httpkit.NewClient(httpkit.ClientOptions{
 		BaseURL: trimmedBaseURL,

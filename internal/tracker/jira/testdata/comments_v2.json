@@ -1,0 +1,19 @@
+{
+  "startAt": 0,
+  "maxResults": 50,
+  "total": 2,
+  "comments": [
+    {
+      "id": "300",
+      "author": {"displayName": "Charlie"},
+      "body": "This is a plain text comment.",
+      "created": "2025-06-01T10:00:00.000+0000"
+    },
+    {
+      "id": "301",
+      "author": {"displayName": "Dana"},
+      "body": "Another plain text comment.",
+      "created": "2025-06-01T11:00:00.000+0000"
+    }
+  ]
+}

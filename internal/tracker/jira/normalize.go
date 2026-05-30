@@ -12,10 +12,20 @@ import (
 // inwardIssue produce a BlockerRef.
 const blockerLinkTypeName = "Blocks"
 
-// searchResponse represents GET /rest/api/3/search/jql response.
+// searchResponse represents GET /rest/api/3/search/jql response
+// (cursor-based pagination).
 type searchResponse struct {
 	Issues        []jiraIssue `json:"issues"`
 	NextPageToken string      `json:"nextPageToken,omitempty"`
+}
+
+// searchResponseV2 represents GET /rest/api/2/search response
+// (offset-based pagination).
+type searchResponseV2 struct {
+	Issues     []jiraIssue `json:"issues"`
+	StartAt    int         `json:"startAt"`
+	Total      int         `json:"total"`
+	MaxResults int         `json:"maxResults"`
 }
 
 // jiraIssue represents a single issue in a search or issue-detail response.
@@ -99,13 +109,14 @@ type jiraComment struct {
 // normalizeSearchIssue maps a Jira API issue to a domain.Issue. The
 // endpoint is used to construct the browse URL. Labels are lowercased,
 // priority parsed as integer (nil on failure), and blocker refs
-// extracted from issuelinks.
-func normalizeSearchIssue(endpoint string, ji jiraIssue) domain.Issue {
+// extracted from issuelinks. When adf is true, the description is
+// treated as ADF (v3); otherwise it is a plain JSON string (v2).
+func normalizeSearchIssue(endpoint string, ji jiraIssue, adf bool) domain.Issue {
 	issue := domain.Issue{
 		ID:          ji.ID,
 		Identifier:  ji.Key,
 		Title:       ji.Fields.Summary,
-		Description: flattenADF(unmarshalADF(ji.Fields.Description)),
+		Description: normalizeDescription(ji.Fields.Description, adf),
 		URL:         endpoint + "/browse/" + ji.Key,
 		CreatedAt:   ji.Fields.Created,
 		UpdatedAt:   ji.Fields.Updated,
@@ -161,15 +172,50 @@ func extractBlockers(links []jiraIssueLink) []domain.BlockerRef {
 	return blockers
 }
 
+// normalizeDescription extracts plain text from a Jira description
+// field. When adf is true (v3), the raw JSON is an ADF document that
+// is flattened. When false (v2), the raw JSON is a plain string.
+func normalizeDescription(raw json.RawMessage, adf bool) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	if adf {
+		return flattenADF(unmarshalADF(raw))
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return ""
+	}
+	return s
+}
+
+// normalizeCommentBody extracts plain text from a Jira comment body
+// field. When adf is true (v3), the raw JSON is an ADF document.
+// When false (v2), the raw JSON is a plain string.
+func normalizeCommentBody(raw json.RawMessage, adf bool) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	if adf {
+		return flattenADF(unmarshalADF(raw))
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return ""
+	}
+	return s
+}
+
 // normalizeComments maps Jira comment objects to domain.Comment
-// values. ADF bodies are flattened to plain text. Nil author fields
-// produce an empty author string.
-func normalizeComments(comments []jiraComment) []domain.Comment {
+// values. When adf is true, bodies are treated as ADF (v3);
+// otherwise as plain strings (v2). Nil author fields produce an
+// empty author string.
+func normalizeComments(comments []jiraComment, adf bool) []domain.Comment {
 	source := make([]issuekit.SourceComment, len(comments))
 	for i, c := range comments {
 		source[i] = issuekit.SourceComment{
 			ID:        c.ID,
-			Body:      flattenADF(unmarshalADF(c.Body)),
+			Body:      normalizeCommentBody(c.Body, adf),
 			CreatedAt: c.Created,
 		}
 		if c.Author != nil {

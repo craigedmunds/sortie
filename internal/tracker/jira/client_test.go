@@ -16,7 +16,7 @@ import (
 
 func newTestJiraClient(t *testing.T, baseURL, email, token string) *httpkit.Client {
 	t.Helper()
-	return newJiraClient(baseURL, email, token, "sortie/test")
+	return newJiraClient(baseURL, email, token, "sortie/test", "basic")
 }
 
 func assertClientTrackerErrorKind(t *testing.T, err error, want domain.TrackerErrorKind) {
