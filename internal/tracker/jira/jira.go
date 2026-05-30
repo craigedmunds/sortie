@@ -43,10 +43,6 @@ var defaultActiveStates = []string{"Backlog", "Selected for Development", "In Pr
 // for v3, offset-based for v2).
 const maxSearchResults = "50"
 
-// maxSearchResultsInt is the integer form of maxSearchResults for v2
-// offset-based pagination comparisons.
-const maxSearchResultsInt = 50
-
 // maxCommentResults is the page size for offset-based comment pagination.
 const maxCommentResults = 50
 
