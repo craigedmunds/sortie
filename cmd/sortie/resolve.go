@@ -29,6 +29,7 @@ func trackerConfigMap(tc config.TrackerConfig) map[string]any {
 		"kind":              tc.Kind,
 		"endpoint":          tc.Endpoint,
 		"api_key":           tc.APIKey,
+		"api_version":       tc.APIVersion,
 		"project":           tc.Project,
 		"active_states":     tc.ActiveStates,
 		"terminal_states":   tc.TerminalStates,
